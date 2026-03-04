@@ -2,6 +2,8 @@ import Foundation
 import NIOCore
 import NIOPosix
 import NIOHTTP1
+import NIOTLS
+import NIOHTTP2
 import NIOSSL
 import NIOWebSocket
 import NIOHTTPCompression
@@ -139,15 +141,43 @@ public final class NIOHttpServer: @unchecked Sendable {
         pipeline: @escaping RequestDelegate,
         tlsConfig: NIOSSLContext?
     ) -> EventLoopFuture<Void> {
-        let future: EventLoopFuture<Void>
         if let tls = tlsConfig {
             let sslHandler = try! NIOSSLServerHandler(context: tls)
-            future = channel.pipeline.addHandler(sslHandler)
+            if options.enableHttp2 {
+                // TLS + ALPN: NIOHTTP2 installs ApplicationProtocolNegotiationHandler
+                // which branches to h2 or http/1.1 after TLS handshake completes.
+                return channel.pipeline.addHandler(sslHandler).flatMap {
+                    channel.configureHTTP2SecureUpgrade(
+                        h2ChannelConfigurator: { [self] ch in self.configureH2Pipeline(ch, appPipeline: pipeline) },
+                        http1ChannelConfigurator: { [self] ch in self.configureHttp1Pipeline(ch, appPipeline: pipeline) }
+                    )
+                }
+            } else {
+                return channel.pipeline.addHandler(sslHandler).flatMap {
+                    self.configureHttp1Pipeline(channel, appPipeline: pipeline)
+                }
+            }
+        } else if options.enableHttp2 {
+            // h2c: cleartext HTTP/2 (prior knowledge — useful for benchmarking)
+            return configureH2Pipeline(channel, appPipeline: pipeline)
         } else {
-            future = channel.eventLoop.makeSucceededFuture(())
+            return configureHttp1Pipeline(channel, appPipeline: pipeline)
         }
+    }
 
-        // Build NIO WebSocket upgraders for each registered WS route
+    /// HTTP/2: NIO multiplexer + per-stream HTTP/1 codec, then reuse RequestAccumulator/Http11ChannelHandler.
+    private func configureH2Pipeline(_ channel: Channel, appPipeline: @escaping RequestDelegate) -> EventLoopFuture<Void> {
+        channel.configureHTTP2Pipeline(mode: .server, inboundStreamInitializer: { [self] streamChannel in
+            streamChannel.pipeline.addHandlers([
+                HTTP2FramePayloadToHTTP1ServerCodec(),
+                RequestAccumulator(),
+                Http11ChannelHandler(pipeline: appPipeline, sseRoutes: self.sseRoutes)
+            ])
+        }).map { _ in }
+    }
+
+    /// HTTP/1.1 pipeline (existing path, also used as h2 ALPN fallback).
+    private func configureHttp1Pipeline(_ channel: Channel, appPipeline: @escaping RequestDelegate) -> EventLoopFuture<Void> {
         let upgraders: [NIOWebSocketServerUpgrader] = wsRoutes.map { route in
             NIOWebSocketServerUpgrader(
                 shouldUpgrade: { _, head in
@@ -179,7 +209,7 @@ public final class NIOHttpServer: @unchecked Sendable {
             completionHandler: { _ in }
         )
 
-        return future.flatMap {
+        return channel.eventLoop.makeSucceededFuture(()).flatMap {
             channel.pipeline.configureHTTPServerPipeline(
                 withPipeliningAssistance: true,
                 withServerUpgrade: upgradeConfig,
@@ -192,7 +222,7 @@ public final class NIOHttpServer: @unchecked Sendable {
         }.flatMap {
             channel.pipeline.addHandlers([
                 RequestAccumulator(),
-                Http11ChannelHandler(pipeline: pipeline, sseRoutes: self.sseRoutes)
+                Http11ChannelHandler(pipeline: appPipeline, sseRoutes: self.sseRoutes)
             ])
         }
     }

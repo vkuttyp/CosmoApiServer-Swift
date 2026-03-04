@@ -2,6 +2,7 @@ import Foundation
 import CosmoApiServer
 
 // MARK: - Benchmark Server
+// HTTP/1.1 on port 19000, h2c (cleartext HTTP/2) on port 19002
 // Scenarios:
 //   GET  /ping           → "pong"                 (raw throughput)
 //   GET  /json           → {"status":"ok",...}    (JSON serialization)
@@ -9,65 +10,64 @@ import CosmoApiServer
 //   GET  /route/{id}     → route param extraction (routing performance)
 //   GET  /middleware     → full stack traversal   (all middleware)
 
-let builder = CosmoWebApplicationBuilder()
-builder.listenOn(port: 19000)
-builder.useErrorHandling()
-// Logging removed from global pipeline — adds ~2 stdout writes per request overhead
-// The /middleware route tests full stack via ErrorMiddleware alone
-builder.useThreads(ProcessInfo.processInfo.activeProcessorCount)
-
-let app = builder.build()
-
-// 1. Raw throughput
-app.get("/ping") { ctx in
-    ctx.response.writeText("pong")
+func makeApp(port: Int, http2: Bool) -> CosmoWebApplication {
+    let builder = CosmoWebApplicationBuilder()
+    builder.listenOn(port: port)
+    builder.useErrorHandling()
+    if http2 { builder.useHttp2() }
+    builder.useThreads(ProcessInfo.processInfo.activeProcessorCount)
+    return builder.build()
 }
 
-// 2. JSON serialization
-struct StatusResponse: Encodable {
-    let status: String
-    let timestamp: String
-    let server: String
-}
+// Shared ISO 8601 formatter (cached — ISO8601DateFormatter() is expensive)
 let isoFormatter: ISO8601DateFormatter = {
     let f = ISO8601DateFormatter()
     f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     return f
 }()
-app.get("/json") { ctx in
-    try ctx.response.writeJson(StatusResponse(
-        status: "ok",
-        timestamp: isoFormatter.string(from: Date()),
-        server: "CosmoApiServer-Swift"
-    ))
+
+struct StatusResponse: Encodable {
+    let status: String; let timestamp: String; let server: String
 }
 
-// 3. POST echo (request body → response body)
-app.post("/echo") { ctx in
-    ctx.response.body = ctx.request.body
-    ctx.response.headers["Content-Type"] = ctx.request.header("content-type") ?? "application/octet-stream"
+func registerRoutes(_ app: CosmoWebApplication, label: String) {
+    app.get("/ping") { ctx in
+        ctx.response.writeText("pong")
+    }
+    app.get("/json") { ctx in
+        try ctx.response.writeJson(StatusResponse(
+            status: "ok",
+            timestamp: isoFormatter.string(from: Date()),
+            server: label
+        ))
+    }
+    app.post("/echo") { ctx in
+        ctx.response.body = ctx.request.body
+        ctx.response.headers["Content-Type"] = ctx.request.header("content-type") ?? "application/octet-stream"
+    }
+    app.get("/route/{id}") { ctx in
+        let id = ctx.request.routeValues["id"] ?? "unknown"
+        try ctx.response.writeJson(["id": id])
+    }
+    app.get("/middleware") { ctx in
+        try ctx.response.writeJson(["path": ctx.request.path, "method": ctx.request.method.rawValue])
+    }
 }
 
-// 4. Route parameter extraction
-app.get("/route/{id}") { ctx in
-    let id = ctx.request.routeValues["id"] ?? "unknown"
-    try ctx.response.writeJson(["id": id])
+let h1App  = makeApp(port: 19000, http2: false)
+let h2cApp = makeApp(port: 19002, http2: true)
+
+registerRoutes(h1App,  label: "CosmoApiServer-Swift/h1")
+registerRoutes(h2cApp, label: "CosmoApiServer-Swift/h2c")
+
+print("=== CosmoApiServer-Swift Benchmark ===")
+print("HTTP/1.1  → http://127.0.0.1:19000")
+print("h2c       → http://127.0.0.1:19002")
+print("Threads: \(ProcessInfo.processInfo.activeProcessorCount)")
+
+// Run both servers concurrently
+try await withThrowingTaskGroup(of: Void.self) { group in
+    group.addTask { try await h1App.run() }
+    group.addTask { try await h2cApp.run() }
+    try await group.next()
 }
-
-// 5. Full middleware stack (logging + error handling already in pipeline)
-app.get("/middleware") { ctx in
-    try ctx.response.writeJson(["path": ctx.request.path, "method": ctx.request.method.rawValue])
-}
-
-func isoNow() -> String {
-    let f = ISO8601DateFormatter()
-    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    return f.string(from: Date())
-}
-
-print("=== CosmoApiServer-Swift Benchmark Server ===")
-print("Listening on http://0.0.0.0:19000")
-print("Routes: /ping  /json  /echo  /route/{id}  /middleware")
-print("Built with \(ProcessInfo.processInfo.activeProcessorCount) threads")
-
-try await app.run()
