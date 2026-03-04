@@ -36,6 +36,24 @@ public struct HttpRequest: Sendable {
         try JSONDecoder().decode(type, from: body)
     }
 
+    /// Parse the request body as `multipart/form-data`.
+    ///
+    /// The `Content-Type` header must contain `multipart/form-data` and a
+    /// `boundary` parameter, otherwise ``MultipartParser/ParseError`` is thrown.
+    ///
+    /// ```swift
+    /// app.post("upload") { ctx in
+    ///     let form = try ctx.request.readMultipart()
+    ///     if let file = form.files["avatar"] {
+    ///         // file.filename, file.contentType, file.data
+    ///     }
+    ///     let username = form.fields["username"]
+    /// }
+    /// ```
+    public func readMultipart() throws -> MultipartForm {
+        try MultipartParser.parse(self)
+    }
+
     public init(
         method: HttpMethod,
         path: String,

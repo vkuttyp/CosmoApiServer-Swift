@@ -456,3 +456,152 @@ final class StreamingBodyTests: XCTestCase {
         XCTAssertEqual(res.statusCode, 200)
     }
 }
+
+final class MultipartParserTests: XCTestCase {
+
+    // Build a minimal multipart/form-data body.
+    private func makeBody(boundary: String, parts: [(headers: String, body: String)]) -> Data {
+        var s = ""
+        for part in parts {
+            s += "--\(boundary)\r\n"
+            s += part.headers + "\r\n"
+            s += part.body + "\r\n"
+        }
+        s += "--\(boundary)--\r\n"
+        return Data(s.utf8)
+    }
+
+    func testPlainTextField() throws {
+        let boundary = "TestBoundary123"
+        let body = makeBody(boundary: boundary, parts: [
+            (headers: "Content-Disposition: form-data; name=\"username\"\r\n",
+             body:    "alice"),
+        ])
+        let form = try MultipartParser.parse(body: body,
+                                             contentType: "multipart/form-data; boundary=\(boundary)")
+        XCTAssertEqual(form.fields["username"], "alice")
+        XCTAssertTrue(form.files.isEmpty)
+    }
+
+    func testMultipleTextFields() throws {
+        let boundary = "Bound42"
+        let body = makeBody(boundary: boundary, parts: [
+            (headers: "Content-Disposition: form-data; name=\"first\"\r\n",  body: "John"),
+            (headers: "Content-Disposition: form-data; name=\"last\"\r\n",   body: "Doe"),
+            (headers: "Content-Disposition: form-data; name=\"age\"\r\n",    body: "30"),
+        ])
+        let form = try MultipartParser.parse(body: body,
+                                             contentType: "multipart/form-data; boundary=\(boundary)")
+        XCTAssertEqual(form.fields["first"], "John")
+        XCTAssertEqual(form.fields["last"],  "Doe")
+        XCTAssertEqual(form.fields["age"],   "30")
+    }
+
+    func testFileUpload() throws {
+        let boundary = "FileBoundary"
+        let fileContent = "Hello, file!"
+        var s = ""
+        s += "--\(boundary)\r\n"
+        s += "Content-Disposition: form-data; name=\"avatar\"; filename=\"photo.txt\"\r\n"
+        s += "Content-Type: text/plain\r\n"
+        s += "\r\n"
+        s += fileContent + "\r\n"
+        s += "--\(boundary)--\r\n"
+
+        let form = try MultipartParser.parse(body: Data(s.utf8),
+                                             contentType: "multipart/form-data; boundary=\(boundary)")
+        XCTAssertTrue(form.fields.isEmpty)
+        let file = try XCTUnwrap(form.files["avatar"])
+        XCTAssertEqual(file.filename, "photo.txt")
+        XCTAssertEqual(file.contentType, "text/plain")
+        XCTAssertEqual(String(data: file.data, encoding: .utf8), fileContent)
+    }
+
+    func testMixedFieldsAndFile() throws {
+        let boundary = "MixedBound"
+        let fileBytes = Data([0x89, 0x50, 0x4E, 0x47]) // PNG magic bytes
+        var body = Data()
+        body += Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nMy Photo\r\n".utf8)
+        body += Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"image\"; filename=\"img.png\"\r\nContent-Type: image/png\r\n\r\n".utf8)
+        body += fileBytes
+        body += Data("\r\n--\(boundary)--\r\n".utf8)
+
+        let form = try MultipartParser.parse(body: body,
+                                             contentType: "multipart/form-data; boundary=\(boundary)")
+        XCTAssertEqual(form.fields["title"], "My Photo")
+        let file = try XCTUnwrap(form.files["image"])
+        XCTAssertEqual(file.filename, "image/png" == file.contentType ? "img.png" : "img.png")
+        XCTAssertEqual(file.contentType, "image/png")
+        XCTAssertEqual(file.data, fileBytes)
+    }
+
+    func testBoundaryWithQuotes() throws {
+        let boundary = "quotedBound"
+        let body = makeBody(boundary: boundary, parts: [
+            (headers: "Content-Disposition: form-data; name=\"x\"\r\n", body: "y"),
+        ])
+        // boundary value wrapped in quotes in Content-Type
+        let form = try MultipartParser.parse(body: body,
+                                             contentType: "multipart/form-data; boundary=\"\(boundary)\"")
+        XCTAssertEqual(form.fields["x"], "y")
+    }
+
+    func testNotMultipartThrows() {
+        XCTAssertThrowsError(
+            try MultipartParser.parse(body: Data(), contentType: "application/json")
+        )
+    }
+
+    func testMissingBoundaryThrows() {
+        XCTAssertThrowsError(
+            try MultipartParser.parse(body: Data(), contentType: "multipart/form-data")
+        )
+    }
+
+    func testReadMultipartViaRequest() throws {
+        let boundary = "ReqBound"
+        let body = makeBody(boundary: boundary, parts: [
+            (headers: "Content-Disposition: form-data; name=\"msg\"\r\n", body: "hello"),
+        ])
+        let request = HttpRequest(
+            method: .post, path: "/upload",
+            headers: ["Content-Type": "multipart/form-data; boundary=\(boundary)"],
+            body: body
+        )
+        let form = try request.readMultipart()
+        XCTAssertEqual(form.fields["msg"], "hello")
+    }
+
+    func testEndToEndUploadRoute() async throws {
+        let builder = CosmoWebApplicationBuilder()
+        let app = builder.build()
+
+        app.post("/upload") { ctx in
+            let form = try ctx.request.readMultipart()
+            struct UploadResult: Encodable {
+                let name: String
+                let size: Int
+            }
+            let name = form.fields["name"] ?? "unknown"
+            let size = form.files["file"]?.data.count ?? 0
+            try ctx.response.writeJson(UploadResult(name: name, size: size))
+        }
+
+        let boundary = "E2EBound"
+        var body = Data()
+        body += Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\nAlice\r\n".utf8)
+        body += Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"data.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n".utf8)
+        body += Data(repeating: 0xFF, count: 512)
+        body += Data("\r\n--\(boundary)--\r\n".utf8)
+
+        let client = app.testClient()
+        let res = try await client.post(
+            "/upload", body: body,
+            headers: ["Content-Type": "multipart/form-data; boundary=\(boundary)"]
+        )
+        XCTAssertEqual(res.statusCode, 200)
+        struct UploadResult: Decodable { let name: String; let size: Int }
+        let json = try res.json(UploadResult.self)
+        XCTAssertEqual(json.size, 512)
+    }
+}
