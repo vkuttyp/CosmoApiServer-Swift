@@ -25,6 +25,10 @@ public struct ErrorMiddleware: Middleware {
         } catch let abort as Abort {
             context.response.setStatus(abort.statusCode)
             try context.response.writeJson(ErrorBody(error: abort.reason))
+        } catch let validation as ValidationError {
+            context.response.setStatus(422)
+            let fields = validation.failures.map { FieldError(field: $0.field, message: $0.message) }
+            try context.response.writeJson(ValidationBody(error: "Validation failed", fields: fields))
         } catch {
             logger.error("Unhandled error: \(error)")
             context.response.setStatus(500)
@@ -34,5 +38,15 @@ public struct ErrorMiddleware: Middleware {
 
     private struct ErrorBody: Encodable {
         let error: String
+    }
+
+    private struct FieldError: Encodable {
+        let field: String
+        let message: String
+    }
+
+    private struct ValidationBody: Encodable {
+        let error: String
+        let fields: [FieldError]
     }
 }
