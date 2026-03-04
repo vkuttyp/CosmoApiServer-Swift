@@ -3,6 +3,8 @@ import NIOCore
 import NIOPosix
 import NIOHTTP1
 import NIOSSL
+import NIOWebSocket
+import Logging
 
 public struct ServerOptions: Sendable {
     public var port: Int
@@ -38,11 +40,14 @@ public struct ServerOptions: Sendable {
 /// and dispatches complete requests through the CosmoApiServer middleware pipeline.
 public final class NIOHttpServer: @unchecked Sendable {
     private let options: ServerOptions
+    private let wsRoutes: [(path: String, handler: WebSocketHandler)]
     private var group: MultiThreadedEventLoopGroup?
     private var channel: Channel?
+    private let logger = Logger(label: "cosmo.server")
 
-    public init(options: ServerOptions) {
+    public init(options: ServerOptions, wsRoutes: [(path: String, handler: WebSocketHandler)] = []) {
         self.options = options
+        self.wsRoutes = wsRoutes
     }
 
     public func start(pipeline: @escaping RequestDelegate) async throws {
@@ -62,11 +67,42 @@ public final class NIOHttpServer: @unchecked Sendable {
 
         channel = try await bootstrap.bind(host: options.host, port: options.port).get()
         let scheme = options.enableTls ? "https" : "http"
-        print("Listening on \(scheme)://\(options.host):\(options.port)")
+        logger.info("Listening on \(scheme)://\(options.host):\(options.port)")
     }
 
     public func waitForShutdown() async throws {
-        try await channel?.closeFuture.get()
+        // Install POSIX signal handlers so SIGTERM/SIGINT trigger graceful shutdown.
+        // We ignore the signals at the process level and route them through DispatchSource.
+        let sigStream = AsyncStream<Int32> { continuation in
+            let termSrc = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
+            termSrc.setEventHandler { continuation.yield(SIGTERM) }
+            termSrc.resume()
+            let intSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
+            intSrc.setEventHandler { continuation.yield(SIGINT) }
+            intSrc.resume()
+            continuation.onTermination = { _ in termSrc.cancel(); intSrc.cancel() }
+        }
+        signal(SIGTERM, SIG_IGN)
+        signal(SIGINT, SIG_IGN)
+
+        await withTaskGroup(of: Void.self) { group in
+            // Task 1: wait for channel close (e.g. server error or stop() call)
+            group.addTask { [weak self] in
+                try? await self?.channel?.closeFuture.get()
+            }
+            // Task 2: wait for a signal, then shut down gracefully
+            group.addTask { [weak self] in
+                for await sig in sigStream {
+                    let name = sig == SIGTERM ? "SIGTERM" : "SIGINT"
+                    self?.logger.info("Received \(name) — shutting down gracefully")
+                    try? await self?.shutdown()
+                    break
+                }
+            }
+            // Whichever finishes first, cancel the rest
+            await group.next()
+            group.cancelAll()
+        }
     }
 
     public func shutdown() async throws {
@@ -100,13 +136,47 @@ public final class NIOHttpServer: @unchecked Sendable {
         } else {
             future = channel.eventLoop.makeSucceededFuture(())
         }
+
+        // Build NIO WebSocket upgraders for each registered WS route
+        let upgraders: [NIOWebSocketServerUpgrader] = wsRoutes.map { route in
+            NIOWebSocketServerUpgrader(
+                shouldUpgrade: { _, head in
+                    let path = String(head.uri.split(separator: "?").first ?? Substring(head.uri))
+                    return path == route.path
+                        ? channel.eventLoop.makeSucceededFuture([:])
+                        : channel.eventLoop.makeSucceededFuture(nil)
+                },
+                upgradePipelineHandler: { wsChannel, head in
+                    let ws = WebSocket(channel: wsChannel)
+                    let path = String(head.uri.split(separator: "?").first ?? Substring(head.uri))
+                    let qs   = head.uri.contains("?") ? String(head.uri.drop(while: { $0 != "?" }).dropFirst()) : ""
+                    let req  = HttpRequest(
+                        method: HttpMethod(rawValue: head.method.rawValue) ?? .get,
+                        path: path, queryString: qs,
+                        headers: Dictionary(head.headers.map { ($0.name, $0.value) }, uniquingKeysWith: { $1 }),
+                        body: Data()
+                    )
+                    let handler = route.handler
+                    return wsChannel.pipeline.addHandler(WebSocketFrameHandler(ws: ws)).map {
+                        Task { await handler(req, ws) }
+                    }
+                }
+            )
+        }
+
+        let upgradeConfig: NIOHTTPServerUpgradeSendableConfiguration? = upgraders.isEmpty ? nil : (
+            upgraders: upgraders,
+            completionHandler: { _ in }
+        )
+
         return future.flatMap {
-            channel.pipeline.configureHTTPServerPipeline(withPipeliningAssistance: true, withErrorHandling: true)
+            channel.pipeline.configureHTTPServerPipeline(
+                withPipeliningAssistance: true,
+                withServerUpgrade: upgradeConfig,
+                withErrorHandling: true
+            )
         }.flatMap {
-            channel.pipeline.addHandlers([
-                RequestAccumulator(),
-                Http11ChannelHandler(pipeline: pipeline),
-            ])
+            channel.pipeline.addHandlers([RequestAccumulator(), Http11ChannelHandler(pipeline: pipeline)])
         }
     }
 }

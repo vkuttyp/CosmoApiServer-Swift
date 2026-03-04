@@ -1,10 +1,13 @@
 import Foundation
 
+public typealias WebSocketHandler = @Sendable (HttpRequest, WebSocket) async -> Void
+
 /// The running web application. Holds the route table, middleware pipeline, and server.
 public final class CosmoWebApplication: @unchecked Sendable {
     let routeTable: RouteTable
     let middlewarePipeline: MiddlewarePipeline
     let options: ServerOptions
+    private(set) var wsRoutes: [(path: String, handler: WebSocketHandler)] = []
     private var server: NIOHttpServer?
     private var builtPipeline: RequestDelegate?
 
@@ -65,11 +68,35 @@ public final class CosmoWebApplication: @unchecked Sendable {
         return self
     }
 
+    /// Register a WebSocket endpoint.
+    ///
+    ///     app.webSocket("/ws/chat") { req, ws in
+    ///         ws.onText { ws, text in try? await ws.send("Echo: \(text)") }
+    ///         ws.onClose { _ in print("closed") }
+    ///     }
+    @discardableResult
+    public func webSocket(_ path: String, handler: @escaping WebSocketHandler) -> Self {
+        wsRoutes.append((path: path, handler: handler))
+        return self
+    }
+
+    /// Group routes under a common path prefix.
+    ///
+    ///     app.group("api/v1") { r in
+    ///         r.get("ping") { ctx in try ctx.response.writeJson(["ok": true]) }
+    ///     }
+    @discardableResult
+    public func group(_ prefix: String, configure: (RouteGroup) -> Void) -> Self {
+        let g = RouteGroup(prefix: prefix, routeTable: routeTable)
+        configure(g)
+        return self
+    }
+
     // MARK: - Lifecycle
 
     public func run() async throws {
         let pipeline = buildPipeline()
-        let server = NIOHttpServer(options: options)
+        let server = NIOHttpServer(options: options, wsRoutes: wsRoutes)
         self.server = server
         try await server.start(pipeline: pipeline)
         try await server.waitForShutdown()
@@ -77,7 +104,7 @@ public final class CosmoWebApplication: @unchecked Sendable {
 
     public func start() async throws {
         let pipeline = buildPipeline()
-        let server = NIOHttpServer(options: options)
+        let server = NIOHttpServer(options: options, wsRoutes: wsRoutes)
         self.server = server
         try await server.start(pipeline: pipeline)
     }

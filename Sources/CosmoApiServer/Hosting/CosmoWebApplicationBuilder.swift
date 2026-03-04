@@ -43,6 +43,12 @@ public final class CosmoWebApplicationBuilder: @unchecked Sendable {
     // MARK: - Middleware
 
     @discardableResult
+    public func useErrorHandling() -> Self {
+        middlewarePipeline.useInstance(ErrorMiddleware())
+        return self
+    }
+
+    @discardableResult
     public func useLogging() -> Self {
         middlewarePipeline.useInstance(LoggingMiddleware())
         return self
@@ -57,6 +63,12 @@ public final class CosmoWebApplicationBuilder: @unchecked Sendable {
     @discardableResult
     public func useMiddleware(_ middleware: any Middleware) -> Self {
         middlewarePipeline.useInstance(middleware)
+        return self
+    }
+
+    @discardableResult
+    public func useStaticFiles(at directory: String, prefix: String = "") -> Self {
+        middlewarePipeline.useInstance(StaticFileMiddleware(directory: directory, prefix: prefix))
         return self
     }
 
