@@ -8,6 +8,11 @@ public struct RouterMiddleware: Middleware {
         self.frozen = routeTable.freeze()
     }
 
+    /// Init from an already-frozen table (avoids double-freeze when called from CosmoWebApplication).
+    init(routeTable: FrozenRouteTable) {
+        self.frozen = routeTable
+    }
+
     public func invoke(_ context: HttpContext, next: RequestDelegate) async throws {
         if let (handler, routeValues) = frozen.match(method: context.request.method, path: context.request.path) {
             context.request.routeValues = routeValues

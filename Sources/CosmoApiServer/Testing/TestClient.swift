@@ -41,10 +41,13 @@ public struct TestResponse: Sendable {
 ///     XCTAssertEqual(res2.statusCode, 201)
 public final class TestClient: Sendable {
     private let pipeline: RequestDelegate
+    /// If set, streaming routes are detected and body data is delivered chunk-by-chunk.
+    private let streamingTable: FrozenRouteTable?
 
     /// Create a `TestClient` from a built pipeline delegate.
-    public init(pipeline: @escaping RequestDelegate) {
+    public init(pipeline: @escaping RequestDelegate, streamingTable: FrozenRouteTable? = nil) {
         self.pipeline = pipeline
+        self.streamingTable = streamingTable
     }
 
     // MARK: - HTTP methods
@@ -90,12 +93,25 @@ public final class TestClient: Sendable {
         let cleanPath = String(parts[0])
         let queryString = parts.count > 1 ? String(parts[1]) : ""
 
+        // For streaming routes, wrap the body in an AsyncStream delivered as a single chunk.
+        var bodyStream: BodyStream? = nil
+        var requestBody = body
+        if let table = streamingTable, table.isStreaming(method: method, path: cleanPath) {
+            var continuation: AsyncStream<Data>.Continuation!
+            let asyncStream = AsyncStream<Data> { continuation = $0 }
+            bodyStream = BodyStream(stream: asyncStream)
+            requestBody = Data()  // don't put body in .body; deliver via stream
+            if !body.isEmpty { continuation.yield(body) }
+            continuation.finish()
+        }
+
         let request = HttpRequest(
             method: method,
             path: cleanPath,
             queryString: queryString,
             headers: headers,
-            body: body
+            body: requestBody,
+            bodyStream: bodyStream
         )
         let context = HttpContext(request: request)
         do {

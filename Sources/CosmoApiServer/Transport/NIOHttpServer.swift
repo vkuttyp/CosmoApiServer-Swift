@@ -48,6 +48,7 @@ public final class NIOHttpServer: @unchecked Sendable {
     private let options: ServerOptions
     private let wsRoutes: [(path: String, handler: WebSocketHandler)]
     private let sseRoutes: [(path: String, handler: SseHandler)]
+    private let streamingTable: FrozenRouteTable?
     private var group: MultiThreadedEventLoopGroup?
     private var channel: Channel?
     private let logger = Logger(label: "cosmo.server")
@@ -55,11 +56,13 @@ public final class NIOHttpServer: @unchecked Sendable {
     public init(
         options: ServerOptions,
         wsRoutes: [(path: String, handler: WebSocketHandler)] = [],
-        sseRoutes: [(path: String, handler: SseHandler)] = []
+        sseRoutes: [(path: String, handler: SseHandler)] = [],
+        streamingTable: FrozenRouteTable? = nil
     ) {
         self.options = options
         self.wsRoutes = wsRoutes
         self.sseRoutes = sseRoutes
+        self.streamingTable = streamingTable
     }
 
     public func start(pipeline: @escaping RequestDelegate) async throws {
@@ -170,7 +173,7 @@ public final class NIOHttpServer: @unchecked Sendable {
         channel.configureHTTP2Pipeline(mode: .server, inboundStreamInitializer: { [self] streamChannel in
             streamChannel.pipeline.addHandlers([
                 HTTP2FramePayloadToHTTP1ServerCodec(),
-                RequestAccumulator(),
+                RequestAccumulator(streamingTable: self.streamingTable),
                 Http11ChannelHandler(pipeline: appPipeline, sseRoutes: self.sseRoutes)
             ])
         }).map { _ in }
@@ -221,7 +224,7 @@ public final class NIOHttpServer: @unchecked Sendable {
                 : channel.eventLoop.makeSucceededFuture(())
         }.flatMap {
             channel.pipeline.addHandlers([
-                RequestAccumulator(),
+                RequestAccumulator(streamingTable: self.streamingTable),
                 Http11ChannelHandler(pipeline: appPipeline, sseRoutes: self.sseRoutes)
             ])
         }

@@ -419,3 +419,40 @@ final class TestClientTests: XCTestCase {
         XCTAssertEqual(res.text, "swift")
     }
 }
+
+// MARK: - Streaming body tests
+
+final class StreamingBodyTests: XCTestCase {
+    func testStreamingRouteReceivesChunks() async throws {
+        let builder = CosmoWebApplicationBuilder()
+        let app = builder.build()
+        var received = Data()
+        app.put("/upload", streaming: true) { ctx in
+            if let stream = ctx.request.bodyStream {
+                for await chunk in stream { received.append(chunk) }
+            }
+            ctx.response.writeText("ok")
+        }
+        let client = app.testClient()
+        let body = Data("hello streaming world".utf8)
+        let res = try await client.put("/upload", body: body)
+        XCTAssertEqual(res.statusCode, 200)
+        XCTAssertEqual(res.text, "ok")
+        XCTAssertEqual(received, body)
+    }
+
+    func testNonStreamingRouteBodyUnchanged() async throws {
+        let builder = CosmoWebApplicationBuilder()
+        let app = builder.build()
+        app.post("/echo") { ctx in
+            ctx.response.setStatus(200)
+            ctx.response.write(ctx.request.body)
+        }
+        let client = app.testClient()
+        let body = Data("no streaming here".utf8)
+        let res = try await client.post("/echo", body: body)
+        XCTAssertEqual(String(data: res.body, encoding: .utf8), "no streaming here")
+        // Non-streaming routes receive body in req.body (bodyStream is nil)
+        XCTAssertEqual(res.statusCode, 200)
+    }
+}

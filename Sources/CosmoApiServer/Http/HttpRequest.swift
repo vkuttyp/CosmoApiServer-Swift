@@ -7,6 +7,9 @@ public struct HttpRequest: Sendable {
     public let headers: [String: String]
     public let body: Data
     public var routeValues: [String: String]
+    /// Non-nil when the route was registered with `streaming: true`.
+    /// Iterating this stream yields body chunks as they arrive from the client.
+    public let bodyStream: BodyStream?
 
     public var query: [String: String] {
         guard !queryString.isEmpty else { return [:] }
@@ -39,7 +42,8 @@ public struct HttpRequest: Sendable {
         queryString: String = "",
         headers: [String: String] = [:],
         body: Data = Data(),
-        routeValues: [String: String] = [:]
+        routeValues: [String: String] = [:],
+        bodyStream: BodyStream? = nil
     ) {
         self.method = method
         self.path = path
@@ -47,5 +51,6 @@ public struct HttpRequest: Sendable {
         self.headers = headers
         self.body = body
         self.routeValues = routeValues
+        self.bodyStream = bodyStream
     }
 }
