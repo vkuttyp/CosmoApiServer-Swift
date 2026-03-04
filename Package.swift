@@ -15,7 +15,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.27.0"),
         .package(url: "https://github.com/apple/swift-nio-extras.git", from: "1.21.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
-        .package(url: "https://github.com/vapor/jwt-kit.git", from: "5.0.0"),
+        .package(url: "https://github.com/vapor/jwt-kit.git", "5.0.0"..<"5.3.0"),
     ],
     targets: [
         .target(
