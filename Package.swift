@@ -32,6 +32,10 @@ let package = Package(
                 .product(name: "JWTKit", package: "jwt-kit"),
             ]
         ),
+        .executableTarget(
+            name: "CosmoApiServerBench",
+            dependencies: ["CosmoApiServer"]
+        ),
         .testTarget(
             name: "CosmoApiServerTests",
             dependencies: ["CosmoApiServer"]
