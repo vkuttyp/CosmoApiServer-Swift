@@ -73,6 +73,24 @@ public final class CosmoWebApplicationBuilder: @unchecked Sendable {
     }
 
     @discardableResult
+    public func useSessions(cookieName: String = "cosmo_sid", secure: Bool = false) -> Self {
+        middlewarePipeline.useInstance(SessionMiddleware(cookieName: cookieName, secure: secure))
+        return self
+    }
+
+    @discardableResult
+    public func useRateLimit(perMinute limit: Int) -> Self {
+        middlewarePipeline.useInstance(RateLimitMiddleware(perMinute: limit))
+        return self
+    }
+
+    @discardableResult
+    public func useCompression() -> Self {
+        options.enableCompression = true
+        return self
+    }
+
+    @discardableResult
     public func useJwtAuthentication(options jwtOptions: JwtOptions) -> Self {
         let service = JwtService(options: jwtOptions)
         middlewarePipeline.useInstance(JwtMiddleware(service: service))

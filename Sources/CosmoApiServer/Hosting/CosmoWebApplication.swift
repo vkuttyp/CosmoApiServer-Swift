@@ -8,8 +8,9 @@ public final class CosmoWebApplication: @unchecked Sendable {
     let middlewarePipeline: MiddlewarePipeline
     let options: ServerOptions
     private(set) var wsRoutes: [(path: String, handler: WebSocketHandler)] = []
+    private(set) var sseRoutes: [(path: String, handler: SseHandler)] = []
     private var server: NIOHttpServer?
-    private var builtPipeline: RequestDelegate?
+    private var _pipeline: RequestDelegate?
 
     init(options: ServerOptions, middlewarePipeline: MiddlewarePipeline, routeTable: RouteTable) {
         self.options = options
@@ -80,6 +81,18 @@ public final class CosmoWebApplication: @unchecked Sendable {
         return self
     }
 
+    /// Register a Server-Sent Events endpoint.
+    ///
+    ///     app.sse("/events") { req, stream in
+    ///         try await stream.send(data: "hello", event: "greeting")
+    ///         await stream.close()
+    ///     }
+    @discardableResult
+    public func sse(_ path: String, handler: @escaping SseHandler) -> Self {
+        sseRoutes.append((path: path, handler: handler))
+        return self
+    }
+
     /// Group routes under a common path prefix.
     ///
     ///     app.group("api/v1") { r in
@@ -96,7 +109,7 @@ public final class CosmoWebApplication: @unchecked Sendable {
 
     public func run() async throws {
         let pipeline = buildPipeline()
-        let server = NIOHttpServer(options: options, wsRoutes: wsRoutes)
+        let server = NIOHttpServer(options: options, wsRoutes: wsRoutes, sseRoutes: sseRoutes)
         self.server = server
         try await server.start(pipeline: pipeline)
         try await server.waitForShutdown()
@@ -104,9 +117,18 @@ public final class CosmoWebApplication: @unchecked Sendable {
 
     public func start() async throws {
         let pipeline = buildPipeline()
-        let server = NIOHttpServer(options: options, wsRoutes: wsRoutes)
+        let server = NIOHttpServer(options: options, wsRoutes: wsRoutes, sseRoutes: sseRoutes)
         self.server = server
         try await server.start(pipeline: pipeline)
+    }
+
+    /// Create an in-process test client backed by this application's pipeline.
+    /// No network port is bound; requests are dispatched directly through the middleware stack.
+    ///
+    ///     let client = app.testClient()
+    ///     let res = try await client.get("/health")
+    public func testClient() -> TestClient {
+        TestClient(pipeline: buildPipeline())
     }
 
     public func stop() async throws {
@@ -116,6 +138,7 @@ public final class CosmoWebApplication: @unchecked Sendable {
     // MARK: - Internal
 
     private func buildPipeline() -> RequestDelegate {
+        if let cached = _pipeline { return cached }
         let routeTable = self.routeTable
         let terminal: RequestDelegate = { ctx in
             ctx.response.setStatus(404)
@@ -123,6 +146,8 @@ public final class CosmoWebApplication: @unchecked Sendable {
         }
         let router = RouterMiddleware(routeTable: routeTable)
         middlewarePipeline.useInstance(router)
-        return middlewarePipeline.build(terminal: terminal)
+        let p = middlewarePipeline.build(terminal: terminal)
+        _pipeline = p
+        return p
     }
 }

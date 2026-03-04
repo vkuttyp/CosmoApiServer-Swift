@@ -4,6 +4,7 @@ import NIOPosix
 import NIOHTTP1
 import NIOSSL
 import NIOWebSocket
+import NIOHTTPCompression
 import Logging
 
 public struct ServerOptions: Sendable {
@@ -15,6 +16,7 @@ public struct ServerOptions: Sendable {
     public var enableHttp2: Bool
     public var numberOfThreads: Int
 
+    public var enableCompression: Bool
     public var enableTls: Bool { certificatePath != nil }
 
     public init(
@@ -24,7 +26,8 @@ public struct ServerOptions: Sendable {
         certificatePath: String? = nil,
         certificatePassword: String? = nil,
         enableHttp2: Bool = false,
-        numberOfThreads: Int = System.coreCount
+        numberOfThreads: Int = System.coreCount,
+        enableCompression: Bool = false
     ) {
         self.port = port
         self.host = host
@@ -33,6 +36,7 @@ public struct ServerOptions: Sendable {
         self.certificatePassword = certificatePassword
         self.enableHttp2 = enableHttp2
         self.numberOfThreads = numberOfThreads
+        self.enableCompression = enableCompression
     }
 }
 
@@ -41,13 +45,19 @@ public struct ServerOptions: Sendable {
 public final class NIOHttpServer: @unchecked Sendable {
     private let options: ServerOptions
     private let wsRoutes: [(path: String, handler: WebSocketHandler)]
+    private let sseRoutes: [(path: String, handler: SseHandler)]
     private var group: MultiThreadedEventLoopGroup?
     private var channel: Channel?
     private let logger = Logger(label: "cosmo.server")
 
-    public init(options: ServerOptions, wsRoutes: [(path: String, handler: WebSocketHandler)] = []) {
+    public init(
+        options: ServerOptions,
+        wsRoutes: [(path: String, handler: WebSocketHandler)] = [],
+        sseRoutes: [(path: String, handler: SseHandler)] = []
+    ) {
         self.options = options
         self.wsRoutes = wsRoutes
+        self.sseRoutes = sseRoutes
     }
 
     public func start(pipeline: @escaping RequestDelegate) async throws {
@@ -176,7 +186,14 @@ public final class NIOHttpServer: @unchecked Sendable {
                 withErrorHandling: true
             )
         }.flatMap {
-            channel.pipeline.addHandlers([RequestAccumulator(), Http11ChannelHandler(pipeline: pipeline)])
+            self.options.enableCompression
+                ? channel.pipeline.addHandler(HTTPResponseCompressor())
+                : channel.eventLoop.makeSucceededFuture(())
+        }.flatMap {
+            channel.pipeline.addHandlers([
+                RequestAccumulator(),
+                Http11ChannelHandler(pipeline: pipeline, sseRoutes: self.sseRoutes)
+            ])
         }
     }
 }
