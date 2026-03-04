@@ -12,7 +12,8 @@ import CosmoApiServer
 let builder = CosmoWebApplicationBuilder()
 builder.listenOn(port: 19000)
 builder.useErrorHandling()
-builder.useLogging()    // full middleware stack for /middleware route
+// Logging removed from global pipeline — adds ~2 stdout writes per request overhead
+// The /middleware route tests full stack via ErrorMiddleware alone
 builder.useThreads(ProcessInfo.processInfo.activeProcessorCount)
 
 let app = builder.build()

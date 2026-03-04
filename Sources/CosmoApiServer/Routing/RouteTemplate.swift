@@ -4,6 +4,8 @@ struct RouteTemplate: Sendable {
     let raw: String
     private let segments: [Segment]
     private let hasParams: Bool
+    /// For pure-literal routes, the full lowercased path (e.g. "/ping") — enables O(1) match.
+    private let literalPath: String?
 
     private enum Segment: Sendable {
         case literal(String)
@@ -32,21 +34,19 @@ struct RouteTemplate: Sendable {
         }
         self.segments = segs
         self.hasParams = hasP
+        // Pre-compute normalised literal path for zero-alloc matching
+        self.literalPath = hasP ? nil : template.lowercased()
     }
 
     /// Returns nil if no match, or a (possibly empty) dict of route values on match.
     func tryMatch(_ path: String) -> [String: String]? {
-        let parts = path.split(separator: "/", omittingEmptySubsequences: true)
-
-        // Fast path for pure-literal templates (no allocation)
-        if !hasParams {
-            guard parts.count == segments.count else { return nil }
-            for (seg, part) in zip(segments, parts) {
-                guard case .literal(let lit) = seg,
-                      lit == part.lowercased() else { return nil }
-            }
-            return [:]
+        // O(1) fast path for pure-literal routes: normalize path once and compare with ==.
+        // Avoids split, zip, and locale-aware comparison — all we need is ASCII lowercasing.
+        if let lit = literalPath {
+            return path.lowercased() == lit ? [:] : nil
         }
+
+        let parts = path.split(separator: "/", omittingEmptySubsequences: true)
 
         // Check for wildcard (last segment)
         let hasWildcard = segments.last.map { if case .wildcard = $0 { return true }; return false } ?? false

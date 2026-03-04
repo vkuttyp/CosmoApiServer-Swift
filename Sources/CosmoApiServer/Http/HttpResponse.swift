@@ -3,7 +3,7 @@ import Foundation
 public final class HttpResponse: @unchecked Sendable {
     public var statusCode: Int = 200
     public var reasonPhrase: String = "OK"
-    public var headers: [String: String] = [:]
+    public var headers: [String: String] = Dictionary(minimumCapacity: 8)
     public var body: Data = Data()
 
     public init() {}

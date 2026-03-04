@@ -22,8 +22,11 @@ final class RequestAccumulator: ChannelInboundHandler, @unchecked Sendable {
             bodyBuffer.writeBuffer(&buf)
         case .end:
             guard let head = head else { return }
-            let bytes = bodyBuffer.readBytes(length: bodyBuffer.readableBytes) ?? []
-            let request = buildRequest(head: head, body: Data(bytes))
+            // withUnsafeReadableBytes avoids the intermediate [UInt8] allocation
+            let body = bodyBuffer.withUnsafeReadableBytes { ptr -> Data in
+                Data(bytes: ptr.baseAddress!, count: ptr.count)
+            }
+            let request = buildRequest(head: head, body: body)
             context.fireChannelRead(wrapInboundOut(request))
             self.head = nil
         }
