@@ -86,26 +86,25 @@ public final class NIOHttpServer: @unchecked Sendable {
     }
 
     public func waitForShutdown() async throws {
-        // Install POSIX signal handlers so SIGTERM/SIGINT trigger graceful shutdown.
-        // We ignore the signals at the process level and route them through DispatchSource.
-        let sigStream = AsyncStream<Int32> { continuation in
-            let termSrc = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
-            termSrc.setEventHandler { continuation.yield(SIGTERM) }
-            termSrc.resume()
-            let intSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
-            intSrc.setEventHandler { continuation.yield(SIGINT) }
-            intSrc.resume()
-            continuation.onTermination = { _ in termSrc.cancel(); intSrc.cancel() }
-        }
-        signal(SIGTERM, SIG_IGN)
-        signal(SIGINT, SIG_IGN)
-
         await withTaskGroup(of: Void.self) { group in
             // Task 1: wait for channel close (e.g. server error or stop() call)
             group.addTask { [weak self] in
                 try? await self?.channel?.closeFuture.get()
             }
-            // Task 2: wait for a signal, then shut down gracefully
+#if !os(Windows)
+            // Task 2: wait for POSIX signals (SIGTERM/SIGINT), then shut down gracefully.
+            // DispatchSource.makeSignalSource is not available on Windows.
+            let sigStream = AsyncStream<Int32> { continuation in
+                let termSrc = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
+                termSrc.setEventHandler { continuation.yield(SIGTERM) }
+                termSrc.resume()
+                let intSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
+                intSrc.setEventHandler { continuation.yield(SIGINT) }
+                intSrc.resume()
+                continuation.onTermination = { _ in termSrc.cancel(); intSrc.cancel() }
+            }
+            signal(SIGTERM, SIG_IGN)
+            signal(SIGINT, SIG_IGN)
             group.addTask { [weak self] in
                 for await sig in sigStream {
                     let name = sig == SIGTERM ? "SIGTERM" : "SIGINT"
@@ -114,6 +113,7 @@ public final class NIOHttpServer: @unchecked Sendable {
                     break
                 }
             }
+#endif
             // Whichever finishes first, cancel the rest
             await group.next()
             group.cancelAll()
