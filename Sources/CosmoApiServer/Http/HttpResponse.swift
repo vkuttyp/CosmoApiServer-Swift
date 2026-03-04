@@ -21,7 +21,6 @@ public final class HttpResponse: @unchecked Sendable {
 
     public func writeJson<T: Encodable>(_ value: T) throws {
         let encoder = JSONEncoder()
-        encoder.keyEncodingStrategy = .convertToSnakeCase
         let data = try encoder.encode(value)
         headers["Content-Type"] = "application/json; charset=utf-8"
         write(data)
