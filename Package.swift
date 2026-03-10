@@ -11,7 +11,7 @@ let package = Package(
         .library(name: "CosmoApiServer", targets: ["CosmoApiServer"]),
     ],
     dependencies: [
-        .package(path: "/Users/kutty/dev/CosmoSQLClient/CosmoSQLClient-Swift"),
+        .package(url: "https://github.com/vkuttyp/CosmoSQLClient-Swift.git", branch: "main"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
         .package(url: "https://github.com/apple/swift-nio-http2.git", from: "1.32.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.27.0"),
