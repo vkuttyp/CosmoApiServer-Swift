@@ -27,7 +27,7 @@ public final class FrozenRouteTable: @unchecked Sendable {
     }
 
     /// Returns `true` when the first matching route was registered with `streaming: true`.
-    func isStreaming(method: HttpMethod, path: String) -> Bool {
+    public func isStreaming(method: HttpMethod, path: String) -> Bool {
         guard let entries = routes[method] else { return false }
         for entry in entries where entry.isStreaming {
             if entry.template.tryMatch(path) != nil { return true }
@@ -44,6 +44,12 @@ public final class RouteTable: @unchecked Sendable {
 
     public init() {}
 
+    public func allRoutes() -> [HttpMethod: [String]] {
+        lock.withLock {
+            routes.mapValues { entries in entries.map { $0.template.raw } }
+        }
+    }
+
     public func add(method: HttpMethod, template: String, handler: @escaping RequestDelegate,
                     streaming: Bool = false) {
         let entry = RouteEntry(template: RouteTemplate(template), handler: handler, isStreaming: streaming)
@@ -53,12 +59,12 @@ public final class RouteTable: @unchecked Sendable {
     }
 
     /// Snapshot into a lock-free FrozenRouteTable for use during request handling.
-    func freeze() -> FrozenRouteTable {
+    public func freeze() -> FrozenRouteTable {
         FrozenRouteTable(routes: lock.withLock { routes })
     }
 
     // Legacy path used by tests — delegates to a FrozenRouteTable
-    func match(method: HttpMethod, path: String) -> (handler: RequestDelegate, routeValues: [String: String])? {
-        freeze().match(method: method, path: path)
+    public func match(method: HttpMethod, path: String) -> (handler: RequestDelegate, routeValues: [String: String])? {
+        return freeze().match(method: method, path: path)
     }
 }

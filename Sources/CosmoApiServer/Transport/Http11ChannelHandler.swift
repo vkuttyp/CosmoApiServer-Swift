@@ -1,17 +1,20 @@
 import Foundation
 import NIOCore
 import NIOHTTP1
+import NIOSSL
 
 /// Per-connection HTTP/1.1 handler: receives complete HttpRequest, invokes the
 /// middleware pipeline, writes the HttpResponse.
 final class Http11ChannelHandler: ChannelInboundHandler, @unchecked Sendable {
+    private weak var application: CosmoWebApplication?
     typealias InboundIn = HttpRequest
     typealias OutboundOut = HTTPServerResponsePart
 
     private let pipeline: RequestDelegate
     private let sseRoutes: [(path: String, handler: SseHandler)]
 
-    init(pipeline: @escaping RequestDelegate, sseRoutes: [(path: String, handler: SseHandler)] = []) {
+    init(pipeline: @escaping RequestDelegate, sseRoutes: [(path: String, handler: SseHandler)] = [], application: CosmoWebApplication? = nil) {
+        self.application = application
         self.pipeline = pipeline
         self.sseRoutes = sseRoutes
     }
@@ -27,7 +30,10 @@ final class Http11ChannelHandler: ChannelInboundHandler, @unchecked Sendable {
 
         // Normal HTTP: run middleware pipeline then write response
         let keepAlive = request.header("connection")?.lowercased() != "close"
-        let ctx = HttpContext(request: request)
+        let ctx = HttpContextPool.shared.rent(request: request, application: application)
+        if (try? context.channel.pipeline.syncOperations.handler(type: NIOSSLServerHandler.self)) != nil {
+            ctx.items["__IsHttps"] = true
+        }
         let channel = context.channel
         let pipeline = self.pipeline
 
@@ -40,6 +46,7 @@ final class Http11ChannelHandler: ChannelInboundHandler, @unchecked Sendable {
             }
             channel.eventLoop.execute {
                 ResponseWriter.write(response: ctx.response, context: context, keepAlive: keepAlive)
+                HttpContextPool.shared.return(ctx)
             }
         }
     }

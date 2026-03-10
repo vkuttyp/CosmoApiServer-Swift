@@ -2,11 +2,18 @@ import Foundation
 
 /// Fluent builder for CosmoWebApplication.
 public final class CosmoWebApplicationBuilder: @unchecked Sendable {
+    public let configurationBuilder: ConfigurationBuilder
+    public var configuration: Configuration { configurationBuilder.build() }
     private var options: ServerOptions
     private let middlewarePipeline: MiddlewarePipeline
     private let routeTable: RouteTable
 
     public init() {
+        let env = Environment.current.description
+        self.configurationBuilder = ConfigurationBuilder()
+            .addJsonFile("appsettings.json")
+            .addJsonFile("appsettings.\(env).json")
+            .addEnvironmentVariables()
         self.options = ServerOptions()
         self.middlewarePipeline = MiddlewarePipeline()
         self.routeTable = RouteTable()
@@ -79,6 +86,24 @@ public final class CosmoWebApplicationBuilder: @unchecked Sendable {
     }
 
     @discardableResult
+    public func useHttpsRedirection(_ options: HttpsRedirectionOptions = HttpsRedirectionOptions()) -> Self {
+        middlewarePipeline.useInstance(HttpsRedirectionMiddleware(options: options))
+        return self
+    }
+
+    @discardableResult
+    public func useHsts(_ options: HstsOptions = HstsOptions()) -> Self {
+        middlewarePipeline.useInstance(HstsMiddleware(options: options))
+        return self
+    }
+
+    @discardableResult
+    public func useCsrf(_ options: CsrfOptions = CsrfOptions()) -> Self {
+        middlewarePipeline.useInstance(CsrfMiddleware(options: options))
+        return self
+    }
+
+    @discardableResult
     public func useRateLimit(perMinute limit: Int) -> Self {
         middlewarePipeline.useInstance(RateLimitMiddleware(perMinute: limit))
         return self
@@ -99,11 +124,25 @@ public final class CosmoWebApplicationBuilder: @unchecked Sendable {
 
     // MARK: - Build
 
+    @discardableResult
+    public func useOpenApi(_ path: String = "/openapi.json", info: OpenApiInfo = OpenApiInfo()) -> Self {
+        let spec = OpenApiGenerator.generate(routes: routeTable.allRoutes(), info: info)
+        middlewarePipeline.useInstance(OpenApiMiddleware(path: path, spec: spec))
+        return self
+    }
+
+    @discardableResult
+    public func useSwagger(_ path: String = "/swagger", openApiUrl: String = "/openapi.json") -> Self {
+        middlewarePipeline.useInstance(SwaggerUIMiddleware(path: path, openApiUrl: openApiUrl))
+        return self
+    }
+
     public func build() -> CosmoWebApplication {
-        CosmoWebApplication(
+        return CosmoWebApplication(
             options: options,
             middlewarePipeline: middlewarePipeline,
-            routeTable: routeTable
+            routeTable: routeTable,
+            configuration: self.configuration
         )
     }
 }

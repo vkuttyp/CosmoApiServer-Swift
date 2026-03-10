@@ -1,36 +1,13 @@
 import Foundation
 
-// MARK: - Token bucket (per-IP)
-
-actor TokenBucket {
-    private var tokens: Double
-    private let maxTokens: Double
-    private let refillPerSecond: Double
-    private var lastRefill: Date
-
-    init(maxTokens: Double, refillPerSecond: Double) {
-        self.tokens = maxTokens
-        self.maxTokens = maxTokens
-        self.refillPerSecond = refillPerSecond
-        self.lastRefill = Date()
-    }
-
-    /// Attempt to consume one token. Returns `true` if allowed, `false` if rate-limited.
-    func consume() -> Bool {
-        let now = Date()
-        let elapsed = now.timeIntervalSince(lastRefill)
-        tokens = min(maxTokens, tokens + elapsed * refillPerSecond)
-        lastRefill = now
-        guard tokens >= 1.0 else { return false }
-        tokens -= 1.0
-        return true
-    }
-}
-
-// MARK: - Store
-
+// Optimized token bucket logic stored inside the store actor to reduce context switching.
 actor RateLimitStore {
-    private var buckets: [String: TokenBucket] = [:]
+    private struct Bucket {
+        var tokens: Double
+        var lastRefill: Date
+    }
+    
+    private var buckets: [String: Bucket] = [:]
     private let maxTokens: Double
     private let refillPerSecond: Double
 
@@ -39,21 +16,25 @@ actor RateLimitStore {
         self.refillPerSecond = refillPerSecond
     }
 
-    func bucket(for key: String) -> TokenBucket {
-        if let b = buckets[key] { return b }
-        let b = TokenBucket(maxTokens: maxTokens, refillPerSecond: refillPerSecond)
+    func isAllowed(key: String) -> Bool {
+        let now = Date()
+        var b = buckets[key] ?? Bucket(tokens: maxTokens, lastRefill: now)
+        
+        let elapsed = now.timeIntervalSince(b.lastRefill)
+        b.tokens = min(maxTokens, b.tokens + elapsed * refillPerSecond)
+        b.lastRefill = now
+        
+        if b.tokens >= 1.0 {
+            b.tokens -= 1.0
+            buckets[key] = b
+            return true
+        }
+        
         buckets[key] = b
-        return b
+        return false
     }
 }
 
-// MARK: - Middleware
-
-/// Per-IP token-bucket rate limiter.
-///
-/// Returns `429 Too Many Requests` when the limit is exceeded.
-///
-///     builder.useRateLimit(perMinute: 60)
 public struct RateLimitMiddleware: Middleware {
     private let store: RateLimitStore
     private let limit: Int
@@ -66,14 +47,13 @@ public struct RateLimitMiddleware: Middleware {
 
     public func invoke(_ context: HttpContext, next: RequestDelegate) async throws {
         let ip = clientIP(from: context.request)
-        let bucket = await store.bucket(for: ip)
-        let allowed = await bucket.consume()
+        let allowed = await store.isAllowed(key: ip)
 
         guard allowed else {
             context.response.setStatus(429)
-            context.response.headers["Retry-After"] = "60"
-            context.response.headers["X-RateLimit-Limit"] = String(limit)
-            context.response.headers["X-RateLimit-Remaining"] = "0"
+            context.response.setHeader("Retry-After", "60")
+            context.response.setHeader("X-RateLimit-Limit", String(limit))
+            context.response.setHeader("X-RateLimit-Remaining", "0")
             context.response.writeText("429 Too Many Requests")
             return
         }
@@ -82,7 +62,6 @@ public struct RateLimitMiddleware: Middleware {
     }
 
     private func clientIP(from request: HttpRequest) -> String {
-        // Prefer X-Forwarded-For (first value, from proxy), then X-Real-IP, then unknown
         if let xff = request.header("x-forwarded-for") {
             return String(xff.split(separator: ",").first ?? Substring(xff))
                 .trimmingCharacters(in: .whitespaces)

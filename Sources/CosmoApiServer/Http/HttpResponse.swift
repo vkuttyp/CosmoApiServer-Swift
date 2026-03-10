@@ -1,45 +1,76 @@
 import Foundation
+import NIOCore
+import NIOHTTP1
 
 public final class HttpResponse: @unchecked Sendable {
+    public weak var httpContext: HttpContext?
     public var statusCode: Int = 200
     public var reasonPhrase: String = "OK"
-    public var headers: [String: String] = Dictionary(minimumCapacity: 8)
-    public var body: Data = Data()
+    public var headers: HTTPHeaders = HTTPHeaders()
+    public var body: ByteBuffer = ByteBuffer()
 
     public init() {}
 
+    public func reset() {
+        statusCode = 200
+        reasonPhrase = "OK"
+        headers = HTTPHeaders()
+        body.clear()
+    }
+
+    public func setStatus(_ code: Int, reason: String? = nil) {
+        self.statusCode = code
+        if let reason = reason {
+            self.reasonPhrase = reason
+        } else {
+            self.reasonPhrase = Self.defaultReasonPhrase(for: code)
+        }
+    }
+
+    public func setHeader(_ name: String, _ value: String) {
+        headers.replaceOrAdd(name: name, value: value)
+    }
+
     public func write(_ data: Data) {
-        body = data
-        headers["Content-Length"] = String(data.count)
+        var buffer = ByteBuffer()
+        buffer.writeBytes(data)
+        write(buffer)
+    }
+
+    public func write(_ buffer: ByteBuffer) {
+        var mutableBuffer = buffer
+        body.writeBuffer(&mutableBuffer)
+        headers.replaceOrAdd(name: "Content-Length", value: String(body.readableBytes))
     }
 
     public func writeText(_ text: String, contentType: String = "text/plain; charset=utf-8") {
-        let data = Data(text.utf8)
-        headers["Content-Type"] = contentType
-        write(data)
+        headers.replaceOrAdd(name: "Content-Type", value: contentType)
+        body.writeString(text)
+        headers.replaceOrAdd(name: "Content-Length", value: String(body.readableBytes))
+    }
+
+    public func writeHTML(_ component: any Component) {
+        headers.replaceOrAdd(name: "Content-Type", value: "text/html; charset=utf-8")
+        component.write(to: &body)
+        headers.replaceOrAdd(name: "Content-Length", value: String(body.readableBytes))
     }
 
     public func writeJson<T: Encodable>(_ value: T) throws {
-        let encoder = JSONEncoder()
-        let data = try encoder.encode(value)
-        headers["Content-Type"] = "application/json; charset=utf-8"
-        write(data)
+        let data = try JSONResource.encoder.encode(value)
+        headers.replaceOrAdd(name: "Content-Type", value: "application/json")
+        body.writeBytes(data)
+        headers.replaceOrAdd(name: "Content-Length", value: String(body.readableBytes))
     }
 
-    public func setStatus(_ code: Int) {
-        statusCode = code
-        reasonPhrase = Self.reasonPhrase(for: code)
-    }
-
-    static func reasonPhrase(for code: Int) -> String {
+    public static func defaultReasonPhrase(for code: Int) -> String {
         switch code {
         case 200: return "OK"
         case 201: return "Created"
         case 204: return "No Content"
-        case 206: return "Partial Content"
         case 301: return "Moved Permanently"
         case 302: return "Found"
         case 304: return "Not Modified"
+        case 307: return "Temporary Redirect"
         case 400: return "Bad Request"
         case 401: return "Unauthorized"
         case 403: return "Forbidden"

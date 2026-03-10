@@ -9,12 +9,21 @@ public struct LoggingMiddleware: Middleware {
     }
 
     public func invoke(_ context: HttpContext, next: RequestDelegate) async throws {
-        let req = context.request
-        let qs = req.queryString.isEmpty ? "" : "?\(req.queryString)"
-        logger.info("--> \(req.method.rawValue) \(req.path)\(qs)")
-        let start = Date()
+        // Optimization: Only do string work if we are going to log
+        if logger.logLevel <= .info {
+            let req = context.request
+            let qs = req.queryString.isEmpty ? "" : "?\(req.queryString)"
+            logger.info("--> \(req.method.rawValue) \(req.path)\(qs)")
+        }
+        
+        let start = DispatchTime.now()
         try await next(context)
-        let ms = Int(Date().timeIntervalSince(start) * 1000)
-        logger.info("<-- \(context.response.statusCode) (\(ms)ms)")
+        
+        if logger.logLevel <= .info {
+            let end = DispatchTime.now()
+            let nanoTime = end.uptimeNanoseconds - start.uptimeNanoseconds
+            let ms = Double(nanoTime) / 1_000_000
+            logger.info("<-- \(context.response.statusCode) (\(String(format: "0.00", ms))ms)")
+        }
     }
 }

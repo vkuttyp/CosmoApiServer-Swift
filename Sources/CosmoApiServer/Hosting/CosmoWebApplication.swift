@@ -5,14 +5,18 @@ public typealias WebSocketHandler = @Sendable (HttpRequest, WebSocket) async -> 
 /// The running web application. Holds the route table, middleware pipeline, and server.
 public final class CosmoWebApplication: @unchecked Sendable {
     let routeTable: RouteTable
+    public let configuration: Configuration
     let middlewarePipeline: MiddlewarePipeline
     let options: ServerOptions
     private(set) var wsRoutes: [(path: String, handler: WebSocketHandler)] = []
     private(set) var sseRoutes: [(path: String, handler: SseHandler)] = []
     private var server: NIOHttpServer?
     private var _pipeline: RequestDelegate?
+    public var appComponent: (any LayoutComponent)?
+    public var mainLayout: (any LayoutComponent)?
 
-    init(options: ServerOptions, middlewarePipeline: MiddlewarePipeline, routeTable: RouteTable) {
+    init(options: ServerOptions, middlewarePipeline: MiddlewarePipeline, routeTable: RouteTable, configuration: Configuration = .shared) {
+        self.configuration = configuration
         self.options = options
         self.middlewarePipeline = middlewarePipeline
         self.routeTable = routeTable
@@ -21,7 +25,20 @@ public final class CosmoWebApplication: @unchecked Sendable {
     // MARK: - Route registration
 
     @discardableResult
+    public func component<T: Component>(_ template: String, _ type: T.Type, configure: (@Sendable (HttpContext, inout T) -> Void)? = nil) -> Self {
+        routeTable.add(method: .get, template: template) { ctx in
+            var comp = T()
+            comp.context = ctx
+            configure?(ctx, &comp)
+            return try await ComponentResult(comp).execute(response: ctx.response)
+        }
+        return self
+    }
+
+
+    @discardableResult
     public func get(_ template: String, handler: @escaping RequestDelegate) -> Self {
+        fputs("Registering route: \(template)\n", stderr)
         routeTable.add(method: .get, template: template, handler: handler)
         return self
     }
@@ -111,7 +128,7 @@ public final class CosmoWebApplication: @unchecked Sendable {
         let frozen = routeTable.freeze()
         let pipeline = buildPipeline(frozen: frozen)
         let server = NIOHttpServer(options: options, wsRoutes: wsRoutes, sseRoutes: sseRoutes,
-                                   streamingTable: frozen)
+                                   streamingTable: frozen, application: self)
         self.server = server
         try await server.start(pipeline: pipeline)
         try await server.waitForShutdown()
@@ -121,7 +138,7 @@ public final class CosmoWebApplication: @unchecked Sendable {
         let frozen = routeTable.freeze()
         let pipeline = buildPipeline(frozen: frozen)
         let server = NIOHttpServer(options: options, wsRoutes: wsRoutes, sseRoutes: sseRoutes,
-                                   streamingTable: frozen)
+                                   streamingTable: frozen, application: self)
         self.server = server
         try await server.start(pipeline: pipeline)
     }
@@ -133,7 +150,7 @@ public final class CosmoWebApplication: @unchecked Sendable {
     ///     let res = try await client.get("/health")
     public func testClient() -> TestClient {
         let frozen = routeTable.freeze()
-        return TestClient(pipeline: buildPipeline(frozen: frozen), streamingTable: frozen)
+        return TestClient(pipeline: buildPipeline(frozen: frozen), streamingTable: frozen, application: self)
     }
 
     public func stop() async throws {

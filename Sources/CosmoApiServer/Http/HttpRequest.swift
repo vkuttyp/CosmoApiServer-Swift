@@ -1,20 +1,35 @@
 import Foundation
+import NIOCore
+import NIOHTTP1
 
 public struct HttpRequest: Sendable {
     public let method: HttpMethod
-    public let path: String
-    public let queryString: String
-    public let headers: [String: String]
-    public let body: Data
+    public let uri: String
+    public let headers: HTTPHeaders
+    public let body: ByteBuffer
     public var routeValues: [String: String]
-    /// Non-nil when the route was registered with `streaming: true`.
-    /// Iterating this stream yields body chunks as they arrive from the client.
     public let bodyStream: BodyStream?
 
+    // Lazy parsing of path and query string to avoid eager allocations
+    public var path: String {
+        if let qi = uri.firstIndex(of: "?") {
+            return String(uri[..<qi])
+        }
+        return uri
+    }
+
+    public var queryString: String {
+        if let qi = uri.firstIndex(of: "?") {
+            return String(uri[uri.index(after: qi)...])
+        }
+        return ""
+    }
+
     public var query: [String: String] {
-        guard !queryString.isEmpty else { return [:] }
+        let qs = queryString
+        guard !qs.isEmpty else { return [:] }
         var result: [String: String] = [:]
-        for pair in queryString.split(separator: "&") {
+        for pair in qs.split(separator: "&") {
             let parts = pair.split(separator: "=", maxSplits: 1)
             if parts.count == 2 {
                 let key = String(parts[0]).removingPercentEncoding ?? String(parts[0])
@@ -28,44 +43,29 @@ public struct HttpRequest: Sendable {
     }
 
     public func header(_ name: String) -> String? {
-        let lower = name.lowercased()
-        return headers.first(where: { $0.key.lowercased() == lower })?.value
+        headers.first(name: name)
     }
 
     public func readJson<T: Decodable>(_ type: T.Type) throws -> T {
-        try JSONDecoder().decode(type, from: body)
+        return try body.withUnsafeReadableBytes { ptr in
+            try JSONResource.decoder.decode(type, from: Data(bytes: ptr.baseAddress!, count: ptr.count))
+        }
     }
 
-    /// Parse the request body as `multipart/form-data`.
-    ///
-    /// The `Content-Type` header must contain `multipart/form-data` and a
-    /// `boundary` parameter, otherwise ``MultipartParser/ParseError`` is thrown.
-    ///
-    /// ```swift
-    /// app.post("upload") { ctx in
-    ///     let form = try ctx.request.readMultipart()
-    ///     if let file = form.files["avatar"] {
-    ///         // file.filename, file.contentType, file.data
-    ///     }
-    ///     let username = form.fields["username"]
-    /// }
-    /// ```
     public func readMultipart() throws -> MultipartForm {
         try MultipartParser.parse(self)
     }
 
     public init(
         method: HttpMethod,
-        path: String,
-        queryString: String = "",
-        headers: [String: String] = [:],
-        body: Data = Data(),
+        uri: String,
+        headers: HTTPHeaders = HTTPHeaders(),
+        body: ByteBuffer = ByteBuffer(),
         routeValues: [String: String] = [:],
         bodyStream: BodyStream? = nil
     ) {
         self.method = method
-        self.path = path
-        self.queryString = queryString
+        self.uri = uri
         self.headers = headers
         self.body = body
         self.routeValues = routeValues

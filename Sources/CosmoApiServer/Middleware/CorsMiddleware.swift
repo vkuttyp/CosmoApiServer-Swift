@@ -33,9 +33,9 @@ public struct CorsMiddleware: Middleware {
 
         if allowed {
             let responseOrigin = options.allowedOrigins.contains("*") ? "*" : origin
-            context.response.headers["Access-Control-Allow-Origin"] = responseOrigin
-            context.response.headers["Access-Control-Allow-Methods"] = allowedMethodsValue
-            context.response.headers["Access-Control-Allow-Headers"] = allowedHeadersValue
+            context.response.setHeader("Access-Control-Allow-Origin", responseOrigin)
+            context.response.setHeader("Access-Control-Allow-Methods", allowedMethodsValue)
+            context.response.setHeader("Access-Control-Allow-Headers", allowedHeadersValue)
         }
 
         if context.request.method == .options {

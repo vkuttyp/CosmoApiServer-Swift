@@ -39,6 +39,10 @@ open class ControllerBase: @unchecked Sendable {
         TextResult(message, status: 401)
     }
 
+    public func component(_ comp: any Component, status: Int = 200) -> any ActionResult {
+        ComponentResult(comp, status: status)
+    }
+
     public func statusCode(_ code: Int) -> any ActionResult {
         StatusCodeResult(code)
     }

@@ -34,16 +34,22 @@ struct RouteTemplate: Sendable {
         }
         self.segments = segs
         self.hasParams = hasP
-        // Pre-compute normalised literal path for zero-alloc matching
-        self.literalPath = hasP ? nil : template.lowercased()
+        // Normalise literal path: always start with / and no trailing slash
+        let clean = template.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        self.literalPath = hasP ? nil : "/\(clean.lowercased())"
     }
 
     /// Returns nil if no match, or a (possibly empty) dict of route values on match.
     func tryMatch(_ path: String) -> [String: String]? {
-        // O(1) fast path for pure-literal routes: normalize path once and compare with ==.
-        // Avoids split, zip, and locale-aware comparison — all we need is ASCII lowercasing.
+        // Normalise incoming path: trim trailing slash (unless it's just "/")
+        var normalPath = path.lowercased()
+        if normalPath.count > 1 && normalPath.hasSuffix("/") {
+            normalPath.removeLast()
+        }
+
+        // O(1) fast path for pure-literal routes
         if let lit = literalPath {
-            return path.lowercased() == lit ? [:] : nil
+            return normalPath == lit ? [:] : nil
         }
 
         let parts = path.split(separator: "/", omittingEmptySubsequences: true)

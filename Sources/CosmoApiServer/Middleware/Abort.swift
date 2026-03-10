@@ -11,7 +11,7 @@ public struct Abort: Error, Sendable {
 
     public init(_ statusCode: Int, reason: String = "") {
         self.statusCode = statusCode
-        self.reason = reason.isEmpty ? HttpResponse.reasonPhrase(for: statusCode) : reason
+        self.reason = reason.isEmpty ? HttpResponse.defaultReasonPhrase(for: statusCode) : reason
     }
 
     // Convenience static constructors

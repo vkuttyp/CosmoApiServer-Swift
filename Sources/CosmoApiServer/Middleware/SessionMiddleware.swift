@@ -71,7 +71,7 @@ public struct SessionMiddleware: Middleware {
     }
 
     public func invoke(_ context: HttpContext, next: RequestDelegate) async throws {
-        let existingId = parseCookie(context.request.headers["Cookie"] ?? "")
+        let existingId = parseCookie(context.request.header("Cookie") ?? "")
         let (session, isNew) = await SessionStore.shared.getOrCreate(id: existingId ?? UUID().uuidString)
         context.items["_session"] = session
 
@@ -80,7 +80,7 @@ public struct SessionMiddleware: Middleware {
         if isNew {
             var cookie = "\(cookieName)=\(session.id); HttpOnly; SameSite=\(sameSite); Path=/"
             if secure { cookie += "; Secure" }
-            context.response.headers["Set-Cookie"] = cookie
+            context.response.setHeader("Set-Cookie", cookie)
         }
     }
 

@@ -42,8 +42,6 @@ public struct ServerOptions: Sendable {
     }
 }
 
-/// TCP listener using SwiftNIO. Builds the per-connection NIO channel pipeline
-/// and dispatches complete requests through the CosmoApiServer middleware pipeline.
 public final class NIOHttpServer: @unchecked Sendable {
     private let options: ServerOptions
     private let wsRoutes: [(path: String, handler: WebSocketHandler)]
@@ -52,25 +50,26 @@ public final class NIOHttpServer: @unchecked Sendable {
     private var group: MultiThreadedEventLoopGroup?
     private var channel: Channel?
     private let logger = Logger(label: "cosmo.server")
+    private weak var application: CosmoWebApplication?
 
     public init(
         options: ServerOptions,
         wsRoutes: [(path: String, handler: WebSocketHandler)] = [],
         sseRoutes: [(path: String, handler: SseHandler)] = [],
-        streamingTable: FrozenRouteTable? = nil
+        streamingTable: FrozenRouteTable? = nil,
+        application: CosmoWebApplication? = nil
     ) {
         self.options = options
         self.wsRoutes = wsRoutes
         self.sseRoutes = sseRoutes
         self.streamingTable = streamingTable
+        self.application = application
     }
 
     public func start(pipeline: @escaping RequestDelegate) async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: options.numberOfThreads)
         self.group = group
-
         let tlsConfig = try buildTLSConfig()
-
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 512)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -79,7 +78,6 @@ public final class NIOHttpServer: @unchecked Sendable {
             }
             .childChannelOption(ChannelOptions.socketOption(.so_keepalive), value: 1)
             .childChannelOption(ChannelOptions.maxMessagesPerRead, value: 16)
-
         channel = try await bootstrap.bind(host: options.host, port: options.port).get()
         let scheme = options.enableTls ? "https" : "http"
         logger.info("Listening on \(scheme)://\(options.host):\(options.port)")
@@ -87,13 +85,8 @@ public final class NIOHttpServer: @unchecked Sendable {
 
     public func waitForShutdown() async throws {
         await withTaskGroup(of: Void.self) { group in
-            // Task 1: wait for channel close (e.g. server error or stop() call)
-            group.addTask { [weak self] in
-                try? await self?.channel?.closeFuture.get()
-            }
+            group.addTask { [weak self] in try? await self?.channel?.closeFuture.get() }
 #if !os(Windows)
-            // Task 2: wait for POSIX signals (SIGTERM/SIGINT), then shut down gracefully.
-            // DispatchSource.makeSignalSource is not available on Windows.
             let sigStream = AsyncStream<Int32> { continuation in
                 let termSrc = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
                 termSrc.setEventHandler { continuation.yield(SIGTERM) }
@@ -103,8 +96,7 @@ public final class NIOHttpServer: @unchecked Sendable {
                 intSrc.resume()
                 continuation.onTermination = { _ in termSrc.cancel(); intSrc.cancel() }
             }
-            signal(SIGTERM, SIG_IGN)
-            signal(SIGINT, SIG_IGN)
+            signal(SIGTERM, SIG_IGN); signal(SIGINT, SIG_IGN)
             group.addTask { [weak self] in
                 for await sig in sigStream {
                     let name = sig == SIGTERM ? "SIGTERM" : "SIGINT"
@@ -114,7 +106,6 @@ public final class NIOHttpServer: @unchecked Sendable {
                 }
             }
 #endif
-            // Whichever finishes first, cancel the rest
             await group.next()
             group.cancelAll()
         }
@@ -125,30 +116,20 @@ public final class NIOHttpServer: @unchecked Sendable {
         try await group?.shutdownGracefully()
     }
 
-    // MARK: - Private
-
     private func buildTLSConfig() throws -> NIOSSLContext? {
         guard options.enableTls, let certPath = options.certificatePath else { return nil }
         var config = TLSConfiguration.makeServerConfiguration(
             certificateChain: try NIOSSLCertificate.fromPEMFile(certPath).map { .certificate($0) },
             privateKey: .file(certPath)
         )
-        if options.enableHttp2 {
-            config.applicationProtocols = ["h2", "http/1.1"]
-        }
+        if options.enableHttp2 { config.applicationProtocols = ["h2", "http/1.1"] }
         return try NIOSSLContext(configuration: config)
     }
 
-    private func initializeChannel(
-        _ channel: Channel,
-        pipeline: @escaping RequestDelegate,
-        tlsConfig: NIOSSLContext?
-    ) -> EventLoopFuture<Void> {
+    private func initializeChannel(_ channel: Channel, pipeline: @escaping RequestDelegate, tlsConfig: NIOSSLContext?) -> EventLoopFuture<Void> {
         if let tls = tlsConfig {
             let sslHandler = try! NIOSSLServerHandler(context: tls)
             if options.enableHttp2 {
-                // TLS + ALPN: NIOHTTP2 installs ApplicationProtocolNegotiationHandler
-                // which branches to h2 or http/1.1 after TLS handshake completes.
                 return channel.pipeline.addHandler(sslHandler).flatMap {
                     channel.configureHTTP2SecureUpgrade(
                         h2ChannelConfigurator: { [self] ch in self.configureH2Pipeline(ch, appPipeline: pipeline) },
@@ -161,44 +142,33 @@ public final class NIOHttpServer: @unchecked Sendable {
                 }
             }
         } else if options.enableHttp2 {
-            // h2c: cleartext HTTP/2 (prior knowledge — useful for benchmarking)
             return configureH2Pipeline(channel, appPipeline: pipeline)
         } else {
             return configureHttp1Pipeline(channel, appPipeline: pipeline)
         }
     }
 
-    /// HTTP/2: NIO multiplexer + per-stream HTTP/1 codec, then reuse RequestAccumulator/Http11ChannelHandler.
     private func configureH2Pipeline(_ channel: Channel, appPipeline: @escaping RequestDelegate) -> EventLoopFuture<Void> {
         channel.configureHTTP2Pipeline(mode: .server, inboundStreamInitializer: { [self] streamChannel in
             streamChannel.pipeline.addHandlers([
                 HTTP2FramePayloadToHTTP1ServerCodec(),
                 RequestAccumulator(streamingTable: self.streamingTable),
-                Http11ChannelHandler(pipeline: appPipeline, sseRoutes: self.sseRoutes)
+                Http11ChannelHandler(pipeline: appPipeline, sseRoutes: self.sseRoutes, application: self.application)
             ])
         }).map { _ in }
     }
 
-    /// HTTP/1.1 pipeline (existing path, also used as h2 ALPN fallback).
     private func configureHttp1Pipeline(_ channel: Channel, appPipeline: @escaping RequestDelegate) -> EventLoopFuture<Void> {
         let upgraders: [NIOWebSocketServerUpgrader] = wsRoutes.map { route in
             NIOWebSocketServerUpgrader(
                 shouldUpgrade: { _, head in
                     let path = String(head.uri.split(separator: "?").first ?? Substring(head.uri))
-                    return path == route.path
-                        ? channel.eventLoop.makeSucceededFuture([:])
-                        : channel.eventLoop.makeSucceededFuture(nil)
+                    return path == route.path ? channel.eventLoop.makeSucceededFuture([:]) : channel.eventLoop.makeSucceededFuture(nil)
                 },
                 upgradePipelineHandler: { wsChannel, head in
                     let ws = WebSocket(channel: wsChannel)
-                    let path = String(head.uri.split(separator: "?").first ?? Substring(head.uri))
-                    let qs   = head.uri.contains("?") ? String(head.uri.drop(while: { $0 != "?" }).dropFirst()) : ""
-                    let req  = HttpRequest(
-                        method: HttpMethod(rawValue: head.method.rawValue) ?? .get,
-                        path: path, queryString: qs,
-                        headers: Dictionary(head.headers.map { ($0.name, $0.value) }, uniquingKeysWith: { $1 }),
-                        body: Data()
-                    )
+                    let req = HttpRequest(method: HttpMethod(rawValue: head.method.rawValue) ?? .get,
+                                          uri: head.uri, headers: head.headers, body: ByteBuffer())
                     let handler = route.handler
                     return wsChannel.pipeline.addHandler(WebSocketFrameHandler(ws: ws)).map {
                         Task { await handler(req, ws) }
@@ -206,26 +176,15 @@ public final class NIOHttpServer: @unchecked Sendable {
                 }
             )
         }
-
-        let upgradeConfig: NIOHTTPServerUpgradeSendableConfiguration? = upgraders.isEmpty ? nil : (
-            upgraders: upgraders,
-            completionHandler: { _ in }
-        )
-
+        let upgradeConfig: NIOHTTPServerUpgradeSendableConfiguration? = upgraders.isEmpty ? nil : (upgraders: upgraders, completionHandler: { _ in })
         return channel.eventLoop.makeSucceededFuture(()).flatMap {
-            channel.pipeline.configureHTTPServerPipeline(
-                withPipeliningAssistance: true,
-                withServerUpgrade: upgradeConfig,
-                withErrorHandling: true
-            )
+            channel.pipeline.configureHTTPServerPipeline(withPipeliningAssistance: true, withServerUpgrade: upgradeConfig, withErrorHandling: true)
         }.flatMap {
-            self.options.enableCompression
-                ? channel.pipeline.addHandler(HTTPResponseCompressor())
-                : channel.eventLoop.makeSucceededFuture(())
+            self.options.enableCompression ? channel.pipeline.addHandler(HTTPResponseCompressor()) : channel.eventLoop.makeSucceededFuture(())
         }.flatMap {
             channel.pipeline.addHandlers([
                 RequestAccumulator(streamingTable: self.streamingTable),
-                Http11ChannelHandler(pipeline: appPipeline, sseRoutes: self.sseRoutes)
+                Http11ChannelHandler(pipeline: appPipeline, sseRoutes: self.sseRoutes, application: self.application)
             ])
         }
     }
